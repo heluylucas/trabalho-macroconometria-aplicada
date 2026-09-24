@@ -42,6 +42,7 @@ use `params$robustez = FALSE` e reduza `params$S`.
 | `02_figuras_slides.R` | Regera as figuras de IRF em formato de slide (largas, em PDF vetorial) a partir dos CSVs de `output/`; rode depois do script principal |
 | `dados/` | Base montada, séries brutas e metadados |
 | `output/` | Figuras (`.png`) e tabelas (`.csv`) geradas pelo script |
+| `artigos/` | Os artigos em que o trabalho se baseia |
 | `Uso_IA.md` | Descrição do uso de ferramentas de IA |
 
 ## Dados
