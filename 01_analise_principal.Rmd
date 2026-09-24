@@ -40,6 +40,8 @@ Este script **não baixa dados**: ele lê `dados/dados_canada.csv`, gerado por `
 
 # Pacotes e funções auxiliares
 
+Instala o que faltar e carrega os pacotes. Além do `bsvarSIGNs`, usamos `vars` e `tsoutliers` na seção de diagnóstico e o `tidyverse` para manipulação e gráficos. O objeto `KMAX` traduz o horizonte K de Uhlig para a convenção do pacote, que conta o impacto como período 1.
+
 ```{r pacotes}
 pacotes <- c("bsvarSIGNs", "vars", "tsoutliers", "forecast",
              "dplyr", "tidyr", "readr", "ggplot2", "knitr")
@@ -245,6 +247,8 @@ ordem_us <- c(1, 2, 3, 6, 5, 4)
 irf_us_chol <- irf_cholesky(post_us, p = 12, ordem = ordem_us, choque = 4)
 ```
 
+Empilha os quantis das duas identificações e desenha as Figuras 5 e 6 do paper num só painel. Salva a figura e os quantis em `output/`, que é a fonte dos números citados no relatório.
+
 ```{r uhlig-figuras, fig.height=8}
 q_us <- rbind(quantis_irf(irf_us,      rot_us, "Restrições de sinal (Fig. 6)"),
               quantis_irf(irf_us_chol, rot_us, "Cholesky (Fig. 5)"))
@@ -255,6 +259,10 @@ write_csv(q_us, "output/irf_replicacao_uhlig.csv")
 ```
 
 **O que conferir.** Com sinais, a banda do PIB deve ficar em torno de zero (no paper, ±0,2%); a fed funds sobe cerca de 20 p.b. e reverte em menos de um ano; o deflator cai devagar. No Cholesky, o PIB cai com clareza e o deflator sobe antes de cair (*price puzzle*). Diferenças de magnitude são esperadas pelo prior e pela constante.
+
+------------------------------------------------------------------------
+
+Fração da variância do erro de previsão atribuída ao choque, em horizontes selecionados. Serve de referência para comparar com a decomposição canadense mais adiante.
 
 ```{r uhlig-fevd}
 kable(tabela_fevd(fevd_sinais(post_us), rot_us),
@@ -291,6 +299,8 @@ stopifnot(!any(is.na(as.matrix(amostra[, vars_ca]))))
 Y_ca <- como_matriz(amostra, vars_ca)
 c(inicio = format(min(amostra$date)), fim = format(max(amostra$date)), T = nrow(amostra))
 ```
+
+Inspeção visual das séries já transformadas, antes de estimar. Serve para checar que a dessazonalização, os logaritmos e o recorte da amostra ficaram como esperado.
 
 ```{r dados-grafico, fig.height=7}
 amostra |>
@@ -381,6 +391,8 @@ cria_dummies <- function(tab_out, datas) {
 }
 ```
 
+Estima os três candidatos a comparar: o sugerido pelo BIC, o sugerido pelo AIC e o VAR(12) de Uhlig. A ACF mostra a autocorrelação remanescente dos resíduos do VAR(12), e a tabela aplica o Edgerton-Shukur aos três, varrendo defasagens além da ordem de cada modelo.
+
 ```{r diagnostico-candidatos, fig.height=6}
 var_aic <- VAR(Y_ts, p = p_aic, type = "const")
 var_bic <- VAR(Y_ts, p = p_bic, type = "const")
@@ -397,6 +409,8 @@ kable(diag_es, digits = 3, row.names = FALSE,
       caption = "Edgerton-Shukur: H0 = ausência de autocorrelação nos resíduos")
 ```
 
+Procura pontos atípicos nos resíduos do VAR(12) e monta as dummies correspondentes. Interessa tanto o diagnóstico quanto a leitura econômica das datas encontradas: elas costumam corresponder a episódios conhecidos.
+
 ```{r outliers}
 tab_out <- outliers_residuos(var_u, amostra$date)
 if (is.null(tab_out)) {
@@ -407,6 +421,8 @@ if (is.null(tab_out)) {
 }
 exo <- cria_dummies(tab_out, amostra$date)
 ```
+
+Refaz a seleção de defasagens com as dummies como exógenas e compara os critérios com e sem elas, na mesma ordem, para ver se os outliers estavam inflando a ordem escolhida. Define o `p_curso`, usado na comparação de defasagens mais adiante.
 
 ```{r reselecao}
 if (!is.null(exo)) {
@@ -441,6 +457,8 @@ A comparação com o baseline está na seção seguinte, depois da estimação.
 
 Restrições nos horizontes k = 0, ..., `r params$K`.
 
+Estima os três modelos canadenses: o baseline, a variante com o câmbio restrito a apreciar e o benchmark recursivo. Os três partem da mesma posterior da forma reduzida, então as diferenças entre eles vêm só da identificação.
+
 ```{r canada-estimacao, results="hide"}
 restr_base   <- c(NA, -1, NA, 1, -1, NA)   # overnight >= 0; CPI <= 0; M1+ <= 0
 restr_cambio <- c(NA, -1, NA, 1, -1, -1)   # + CAD/USD <= 0 (apreciação do CAD)
@@ -457,6 +475,8 @@ irf_ca_chol <- irf_cholesky(post_ca, p = params$p, ordem = 1:6, choque = 4)
 
 ## Resultados: baseline contra Cholesky
 
+Resultado central do trabalho: as respostas sob restrições de sinal e sob Cholesky no mesmo painel. A comparação do painel do PIB é o que responde à pergunta de pesquisa.
+
 ```{r canada-irf-base, fig.height=8}
 q_ca <- rbind(quantis_irf(irf_ca,      rot_ca, "Restrições de sinal (baseline)"),
               quantis_irf(irf_ca_chol, rot_ca, "Cholesky"))
@@ -467,6 +487,8 @@ write_csv(q_ca, "output/irf_canada_baseline_cholesky.csv")
 ```
 
 ## Resultados: câmbio livre contra câmbio restrito
+
+Mostra o efeito de acrescentar a restrição de apreciação cambial, no espírito de Kim e Lim. Serve para medir quanto da conclusão depende de deixar o câmbio livre.
 
 ```{r canada-irf-cambio, fig.height=8}
 q_cambio <- rbind(quantis_irf(irf_ca,        rot_ca, "Câmbio livre"),
@@ -479,10 +501,14 @@ ggsave("output/fig_canada_cambio.png", g_cambio, width = 9, height = 8, dpi = 30
 
 ## Resultados: defasagem de Uhlig contra a do procedimento do curso
 
+Reestima o baseline com a defasagem escolhida pelos critérios de informação e com as dummies de outlier, para confrontar com o `p = 12` herdado de Uhlig.
+
 ```{r canada-lags, results="hide"}
 post_curso <- estima_sinais(Y_ca, restr_base, p = p_curso, exogenas = exo)
 irf_curso  <- irf_sinais(post_curso)
 ```
+
+Compara apenas a resposta do PIB nas duas escolhas de defasagem. Curvas sobrepostas indicam que a convenção de Uhlig não está dirigindo o resultado.
 
 ```{r canada-lags-figura, fig.height=4}
 rot_pib <- "PIB real"
@@ -497,6 +523,8 @@ ggsave("output/fig_canada_lags.png", g_lags, width = 8, height = 4.5, dpi = 300)
 ```
 
 ## Quanto o choque explica? (FEVD)
+
+Decomposição da variância do baseline. Vale olhar tanto a mediana quanto a largura das bandas: bandas muito amplas são sintoma de identificação fraca.
 
 ```{r canada-fevd}
 fevd_ca <- tabela_fevd(fevd_sinais(post_ca), rot_ca)
@@ -553,6 +581,8 @@ q_rob <- do.call(rbind, lapply(names(especificacoes), function(nome) {
 q_rob$modelo <- factor(q_rob$modelo, levels = names(especificacoes))
 ```
 
+Reúne num painel a resposta do PIB em todas as especificações alternativas. A pergunta que a figura responde não é se a mediana muda, e sim se em alguma delas a banda deixa de conter zero.
+
 ```{r robustez-figura, eval=params$robustez, fig.height=9}
 g_rob <- ggplot(q_rob, aes(x = h / 12)) +
   geom_hline(yintercept = 0, linewidth = 0.3) +
@@ -575,6 +605,8 @@ O bsvarSIGNs aceita, além dos sinais, restrições narrativas (Antolín-Díaz e
 No caso canadense, um candidato natural é setembro de 1998, quando o Banco do Canadá subiu a taxa em 100 p.b. de forma não programada durante a crise russa — data que o diagnóstico de outliers acima identifica na equação da overnight. Impor que o choque monetário seja positivo nesse mês reduziria bastante o conjunto identificado. A sintaxe está na função `?specify_narrative` do `bsvarSIGNs`.
 
 # Sessão
+
+Registra versões do R e dos pacotes. Como os resultados dependem da versão do `bsvarSIGNs`, isso permite diagnosticar diferenças numéricas em quem for reproduzir o script.
 
 ```{r sessao}
 sessionInfo()

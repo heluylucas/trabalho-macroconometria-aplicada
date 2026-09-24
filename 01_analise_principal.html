@@ -1515,6 +1515,12 @@ choque monetário; as demais colunas ficam sem interpretação.</p>
 <div id="pacotes-e-funções-auxiliares" class="section level1" number="2">
 <h1><span class="header-section-number">2</span> Pacotes e funções
 auxiliares</h1>
+<p>Instala o que faltar e carrega os pacotes. Além do
+<code>bsvarSIGNs</code>, usamos <code>vars</code> e
+<code>tsoutliers</code> na seção de diagnóstico e o
+<code>tidyverse</code> para manipulação e gráficos. O objeto
+<code>KMAX</code> traduz o horizonte K de Uhlig para a convenção do
+pacote, que conta o impacto como período 1.</p>
 <pre class="r"><code>pacotes &lt;- c(&quot;bsvarSIGNs&quot;, &quot;vars&quot;, &quot;tsoutliers&quot;, &quot;forecast&quot;,
              &quot;dplyr&quot;, &quot;tidyr&quot;, &quot;readr&quot;, &quot;ggplot2&quot;, &quot;knitr&quot;)
 faltando &lt;- pacotes[!pacotes %in% rownames(installed.packages())]
@@ -1720,6 +1726,10 @@ irf_us   &lt;- irf_sinais(post_us)
 # Fig. 5: fed funds em 4º, antes de reservas não emprestadas e totais
 ordem_us &lt;- c(1, 2, 3, 6, 5, 4)
 irf_us_chol &lt;- irf_cholesky(post_us, p = 12, ordem = ordem_us, choque = 4)</code></pre>
+<p>Empilha os quantis das duas identificações e desenha as Figuras 5 e 6
+do paper num só painel. Salva a figura e os quantis em
+<code>output/</code>, que é a fonte dos números citados no
+relatório.</p>
 <pre class="r"><code>q_us &lt;- rbind(quantis_irf(irf_us,      rot_us, &quot;Restrições de sinal (Fig. 6)&quot;),
               quantis_irf(irf_us_chol, rot_us, &quot;Cholesky (Fig. 5)&quot;))
 g_us &lt;- plot_irf(q_us, &quot;Replicação de Uhlig (2005): choque contracionista de 1 d.p., EUA&quot;)
@@ -1733,6 +1743,10 @@ p.b. e reverte em menos de um ano; o deflator cai devagar. No Cholesky,
 o PIB cai com clareza e o deflator sobe antes de cair (<em>price
 puzzle</em>). Diferenças de magnitude são esperadas pelo prior e pela
 constante.</p>
+<hr />
+<p>Fração da variância do erro de previsão atribuída ao choque, em
+horizontes selecionados. Serve de referência para comparar com a
+decomposição canadense mais adiante.</p>
 <pre class="r"><code>kable(tabela_fevd(fevd_sinais(post_us), rot_us),
       caption = &quot;EUA, sinais: % da variância explicada pelo choque monetário (mediana [16%; 84%])&quot;)</code></pre>
 <table>
@@ -1792,7 +1806,7 @@ constante.</p>
 <td align="left">9.0 [0.2; 68.0]</td>
 <td align="left">9.7 [0.4; 71.8]</td>
 <td align="left">7.7 [0.3; 72.2]</td>
-<td align="left">8.7 [0.4; 67.3]</td>
+<td align="left">8.7 [0.5; 67.3]</td>
 <td align="left">5.7 [0.2; 43.4]</td>
 </tr>
 </tbody>
@@ -1829,6 +1843,9 @@ Y_ca &lt;- como_matriz(amostra, vars_ca)
 c(inicio = format(min(amostra$date)), fim = format(max(amostra$date)), T = nrow(amostra))</code></pre>
 <pre><code>##       inicio          fim            T 
 ## &quot;1997-01-01&quot; &quot;2019-12-01&quot;        &quot;276&quot;</code></pre>
+<p>Inspeção visual das séries já transformadas, antes de estimar. Serve
+para checar que a dessazonalização, os logaritmos e o recorte da amostra
+ficaram como esperado.</p>
 <pre class="r"><code>amostra |&gt;
   select(date, all_of(vars_ca)) |&gt;
   pivot_longer(-date) |&gt;
@@ -2004,6 +2021,11 @@ cria_dummies &lt;- function(tab_out, datas) {
   colnames(M) &lt;- paste0(tab$tipo, &quot;_&quot;, format(tab$data, &quot;%Y%m&quot;))
   M
 }</code></pre>
+<p>Estima os três candidatos a comparar: o sugerido pelo BIC, o sugerido
+pelo AIC e o VAR(12) de Uhlig. A ACF mostra a autocorrelação
+remanescente dos resíduos do VAR(12), e a tabela aplica o
+Edgerton-Shukur aos três, varrendo defasagens além da ordem de cada
+modelo.</p>
 <pre class="r"><code>var_aic &lt;- VAR(Y_ts, p = p_aic, type = &quot;const&quot;)
 var_bic &lt;- VAR(Y_ts, p = p_bic, type = &quot;const&quot;)
 var_u   &lt;- VAR(Y_ts, p = params$p, type = &quot;const&quot;)   # o VAR(12) de Uhlig
@@ -2247,6 +2269,10 @@ resíduos</caption>
 </tr>
 </tbody>
 </table>
+<p>Procura pontos atípicos nos resíduos do VAR(12) e monta as dummies
+correspondentes. Interessa tanto o diagnóstico quanto a leitura
+econômica das datas encontradas: elas costumam corresponder a episódios
+conhecidos.</p>
 <pre class="r"><code>tab_out &lt;- outliers_residuos(var_u, amostra$date)
 if (is.null(tab_out)) {
   cat(&quot;Nenhum outlier detectado com |t| &gt; 4.\n&quot;)
@@ -2292,6 +2318,10 @@ if (is.null(tab_out)) {
 </tbody>
 </table>
 <pre class="r"><code>exo &lt;- cria_dummies(tab_out, amostra$date)</code></pre>
+<p>Refaz a seleção de defasagens com as dummies como exógenas e compara
+os critérios com e sem elas, na mesma ordem, para ver se os outliers
+estavam inflando a ordem escolhida. Define o <code>p_curso</code>, usado
+na comparação de defasagens mais adiante.</p>
 <pre class="r"><code>if (!is.null(exo)) {
   ic_d &lt;- VARselect(Y_ts, lag.max = lag_max, type = &quot;const&quot;, exogen = exo)
   cat(sprintf(&quot;Com dummies — AIC: p = %d | HQ: p = %d | BIC: p = %d | FPE: p = %d\n&quot;,
@@ -2355,6 +2385,10 @@ estimação.</p>
 </tbody>
 </table>
 <p>Restrições nos horizontes k = 0, …, 5.</p>
+<p>Estima os três modelos canadenses: o baseline, a variante com o
+câmbio restrito a apreciar e o benchmark recursivo. Os três partem da
+mesma posterior da forma reduzida, então as diferenças entre eles vêm só
+da identificação.</p>
 <pre class="r"><code>restr_base   &lt;- c(NA, -1, NA, 1, -1, NA)   # overnight &gt;= 0; CPI &lt;= 0; M1+ &lt;= 0
 restr_cambio &lt;- c(NA, -1, NA, 1, -1, -1)   # + CAD/USD &lt;= 0 (apreciação do CAD)
 
@@ -2370,6 +2404,9 @@ irf_ca_chol &lt;- irf_cholesky(post_ca, p = params$p, ordem = 1:6, choque = 4)</
 <div id="resultados-baseline-contra-cholesky" class="section level2" number="4.4">
 <h2><span class="header-section-number">4.4</span> Resultados: baseline
 contra Cholesky</h2>
+<p>Resultado central do trabalho: as respostas sob restrições de sinal e
+sob Cholesky no mesmo painel. A comparação do painel do PIB é o que
+responde à pergunta de pesquisa.</p>
 <pre class="r"><code>q_ca &lt;- rbind(quantis_irf(irf_ca,      rot_ca, &quot;Restrições de sinal (baseline)&quot;),
               quantis_irf(irf_ca_chol, rot_ca, &quot;Cholesky&quot;))
 g_ca &lt;- plot_irf(q_ca, &quot;Canadá: choque monetário contracionista de 1 d.p.&quot;)
@@ -2381,6 +2418,9 @@ write_csv(q_ca, &quot;output/irf_canada_baseline_cholesky.csv&quot;)</code></pre
 <div id="resultados-câmbio-livre-contra-câmbio-restrito" class="section level2" number="4.5">
 <h2><span class="header-section-number">4.5</span> Resultados: câmbio
 livre contra câmbio restrito</h2>
+<p>Mostra o efeito de acrescentar a restrição de apreciação cambial, no
+espírito de Kim e Lim. Serve para medir quanto da conclusão depende de
+deixar o câmbio livre.</p>
 <pre class="r"><code>q_cambio &lt;- rbind(quantis_irf(irf_ca,        rot_ca, &quot;Câmbio livre&quot;),
                   quantis_irf(irf_ca_cambio, rot_ca, &quot;Câmbio restrito&quot;))
 g_cambio &lt;- plot_irf(q_cambio, &quot;Canadá: efeito de restringir a resposta do câmbio&quot;)
@@ -2391,8 +2431,14 @@ g_cambio</code></pre>
 <div id="resultados-defasagem-de-uhlig-contra-a-do-procedimento-do-curso" class="section level2" number="4.6">
 <h2><span class="header-section-number">4.6</span> Resultados: defasagem
 de Uhlig contra a do procedimento do curso</h2>
+<p>Reestima o baseline com a defasagem escolhida pelos critérios de
+informação e com as dummies de outlier, para confrontar com o
+<code>p = 12</code> herdado de Uhlig.</p>
 <pre class="r"><code>post_curso &lt;- estima_sinais(Y_ca, restr_base, p = p_curso, exogenas = exo)
 irf_curso  &lt;- irf_sinais(post_curso)</code></pre>
+<p>Compara apenas a resposta do PIB nas duas escolhas de defasagem.
+Curvas sobrepostas indicam que a convenção de Uhlig não está dirigindo o
+resultado.</p>
 <pre class="r"><code>rot_pib &lt;- &quot;PIB real&quot;
 q_lags &lt;- rbind(
   quantis_irf(irf_ca[1, , , drop = FALSE],    rot_pib, paste0(&quot;p = &quot;, params$p, &quot; (Uhlig)&quot;)),
@@ -2407,6 +2453,9 @@ g_lags</code></pre>
 <div id="quanto-o-choque-explica-fevd" class="section level2" number="4.7">
 <h2><span class="header-section-number">4.7</span> Quanto o choque
 explica? (FEVD)</h2>
+<p>Decomposição da variância do baseline. Vale olhar tanto a mediana
+quanto a largura das bandas: bandas muito amplas são sintoma de
+identificação fraca.</p>
 <pre class="r"><code>fevd_ca &lt;- tabela_fevd(fevd_sinais(post_ca), rot_ca)
 kable(fevd_ca, caption = &quot;Canadá, baseline: % da variância explicada pelo choque monetário (mediana [16%; 84%])&quot;)</code></pre>
 <table>
@@ -2437,7 +2486,7 @@ monetário (mediana [16%; 84%])</caption>
 <td align="left">h = 0 m</td>
 <td align="left">5.0 [0.3; 21.0]</td>
 <td align="left">8.7 [0.4; 72.1]</td>
-<td align="left">1.8 [0.1; 34.3]</td>
+<td align="left">1.7 [0.1; 34.2]</td>
 <td align="left">10.5 [0.5; 68.3]</td>
 <td align="left">6.7 [0.3; 69.1]</td>
 <td align="left">3.1 [0.1; 54.9]</td>
@@ -2457,16 +2506,16 @@ monetário (mediana [16%; 84%])</caption>
 <td align="left">4.6 [0.3; 51.0]</td>
 <td align="left">2.9 [0.2; 35.7]</td>
 <td align="left">6.3 [0.4; 54.7]</td>
-<td align="left">7.4 [0.4; 66.3]</td>
+<td align="left">7.3 [0.4; 66.3]</td>
 <td align="left">3.5 [0.2; 38.7]</td>
 </tr>
 <tr class="even">
 <td align="left">h = 48 m</td>
 <td align="left">4.4 [0.2; 33.6]</td>
-<td align="left">5.4 [0.3; 50.1]</td>
+<td align="left">5.3 [0.3; 50.1]</td>
 <td align="left">3.2 [0.2; 38.6]</td>
 <td align="left">5.7 [0.3; 49.6]</td>
-<td align="left">5.5 [0.3; 53.5]</td>
+<td align="left">5.4 [0.3; 53.5]</td>
 <td align="left">3.9 [0.2; 41.2]</td>
 </tr>
 </tbody>
@@ -2569,6 +2618,9 @@ q_rob &lt;- do.call(rbind, lapply(names(especificacoes), function(nome) {
   quantis_irf(irf_sinais(post)[1, , , drop = FALSE], &quot;PIB real&quot;, nome)
 }))
 q_rob$modelo &lt;- factor(q_rob$modelo, levels = names(especificacoes))</code></pre>
+<p>Reúne num painel a resposta do PIB em todas as especificações
+alternativas. A pergunta que a figura responde não é se a mediana muda,
+e sim se em alguma delas a banda deixa de conter zero.</p>
 <pre class="r"><code>g_rob &lt;- ggplot(q_rob, aes(x = h / 12)) +
   geom_hline(yintercept = 0, linewidth = 0.3) +
   geom_ribbon(aes(ymin = q16, ymax = q84), alpha = 0.25, fill = &quot;steelblue&quot;) +
@@ -2599,6 +2651,9 @@ mês reduziria bastante o conjunto identificado. A sintaxe está na função
 </div>
 <div id="sessão" class="section level1" number="7">
 <h1><span class="header-section-number">7</span> Sessão</h1>
+<p>Registra versões do R e dos pacotes. Como os resultados dependem da
+versão do <code>bsvarSIGNs</code>, isso permite diagnosticar diferenças
+numéricas em quem for reproduzir o script.</p>
 <pre class="r"><code>sessionInfo()</code></pre>
 <pre><code>## R version 4.4.1 (2024-06-14 ucrt)
 ## Platform: x86_64-w64-mingw32/x64
