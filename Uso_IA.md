@@ -26,7 +26,7 @@ Uhlig, as três referências centrais.
 
 ### 2. Código
 
-O Claude e o Claude Code foram usados para escrever os scripts em R, corrigir erros, formatar a saída dos resultados e
+O Claude e o Claude Code foram usados para escrever os scripts em R. Foi passado no prompt a ideia de que era necessário dois scripts em Rmd executáveis: o primeiro para download dos dados a partir das fontes pertinentes e o segundo (e principal) para executar a metodologia delimitada em si. A partir disso, a ferramenta foi posta em ação para corrigir erros de execução, formatar a saída dos resultados e
 acrescentar funcionalidades que julgamos necessárias. O exemplo principal é a seção de
 seleção de defasagens por critérios de informação, com diagnóstico de resíduos e detecção
 de outliers, ausente no paper original de Uhlig e incorporada por sugestão nossa, a partir
