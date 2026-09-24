@@ -1,12 +1,13 @@
 ---
 title: "01 — Efeitos da política monetária sobre o produto no Canadá: identificação agnóstica à la Uhlig (2005)"
-subtitle: "Trabalho final de Macroeconometria Aplicada (EESP/FGV) — versão com bsvarSIGNs"
+subtitle: "Trabalho final de Macroeconometria Aplicada (EESP/FGV)"
 author: "Lucas Heluy, Mateus Belline, Theodoro Mota"
 date: "`r format(Sys.Date(), '%d/%m/%Y')`"
 output:
   html_document:
     toc: true
     toc_float: true
+    self_contained: true
     number_sections: true
 params:
   inicio: "1997-01-01"     # início da amostra canadense (PIB mensal começa em 1997)
@@ -35,14 +36,6 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
 
 Este script **não baixa dados**: ele lê `dados/dados_canada.csv`, gerado por `00_download_dados.Rmd`. Figuras e tabelas vão para `output/`.
 
-## O que muda em relação ao VARsignR e ao paper
-
-O bsvarSIGNs implementa o algoritmo de Arias, Rubio-Ramírez e Waggoner (2018). Em vez de sortear um único vetor α na esfera, ele sorteia uma matriz de rotação Q uniforme e guarda o sorteio se a coluna do choque satisfizer os sinais. A primeira coluna de uma Q uniforme é um α uniforme na esfera, então **com restrições só de sinal o procedimento equivale ao de Uhlig**. Três diferenças precisam ser registradas no texto:
-
--   **Prior:** o pacote usa um prior Minnesota com encolhimento hierárquico, não o Normal-Wishart difuso de Uhlig. Com amostra curta e 12 lags isso ajuda, mas os números da replicação não serão idênticos aos do paper.
--   **Constante:** o modelo sempre inclui intercepto. Uhlig não inclui.
--   **Draws:** `S` é o número de sorteios **aceitos**. O pacote continua sorteando até obtê-los, então não há contagem de rejeições como no VARsignR.
-
 **Como as restrições são escritas.** `sign_irf` é um array N × N × (K + 1): linha = variável, coluna = choque, fatia h = horizonte h − 1. Os valores são `1` (≥ 0), `-1` (≤ 0), `0` (zero) ou `NA` (livre). Restringimos só a coluna 1, que passa a ser o choque monetário; as demais colunas ficam sem interpretação.
 
 # Pacotes e funções auxiliares
@@ -57,7 +50,11 @@ invisible(lapply(pacotes, library, character.only = TRUE))
 dir.create("output", showWarnings = FALSE)
 ```
 
-```{r funcoes}
+### Funções Auxiliares
+
+`cria_sign_irf`: Monta o array de restrições no formato que o `bsvarSIGNs` espera: linha é variável, coluna é choque e cada fatia é um horizonte. Só a primeira coluna recebe restrições, e é ela que passa a ser o choque monetário; as demais ficam livres e não têm interpretação estrutural, como em Uhlig. O array tem `K + 1` fatias porque o pacote conta o impacto como período 1.
+
+```{r func-cria-sign-irf}
 # Array de restrições para o choque na coluna 1, nos horizontes 0..K
 cria_sign_irf <- function(restricoes, K = params$K) {
   N <- length(restricoes)
@@ -65,7 +62,11 @@ cria_sign_irf <- function(restricoes, K = params$K) {
   m[, 1] <- restricoes
   array(m, dim = c(N, N, K + 1))
 }
+```
 
+`estima_sinais`: Envelopa a especificação e a estimação num único passo, para que todas as variantes do trabalho usem os mesmos parâmetros do cabeçalho. Zera as observações dummy do prior quando `dummies = FALSE`, aproximando o prior do Normal-Wishart difuso de Uhlig, e aceita variáveis exógenas para a versão com dummies de outlier. O `S` devolvido é o número de sorteios aceitos, não de tentativas.
+
+```{r func-estima-sinais}
 # Especifica e estima o modelo com restrições de sinal
 estima_sinais <- function(Y, restricoes, p = params$p, K = params$K, S = params$S,
                           dummies = params$dummies, exogenas = NULL) {
@@ -86,14 +87,22 @@ estima_sinais <- function(Y, restricoes, p = params$p, K = params$K, S = params$
   }
   estimate(spec, S = S, show_progress = FALSE)
 }
+```
 
+`irf_sinais`: Extrai as respostas a impulso do choque de interesse. O objeto do pacote tem quatro dimensões (variável, choque, horizonte, sorteio); aqui fixamos o choque na coluna 1 e devolvemos um array de três dimensões, que é o formato usado por todas as funções de gráfico e tabela.
+
+```{r func-irf-sinais}
 # IRFs do choque 1 como array [variável, horizonte, draw]
 irf_sinais <- function(post, horizonte = params$passos) {
   irf <- compute_impulse_responses(post, horizon = horizonte)
   stopifnot(length(dim(irf)) == 4)          # [variável, choque, horizonte, draw]
   irf[, 1, , , drop = TRUE]
 }
+```
 
+`fevd_sinais`: Faz o mesmo para a decomposição da variância do erro de previsão. Também detecta a escala do resultado: se os valores vierem como fração, converte para porcentagem, de modo que as tabelas fiquem sempre na mesma unidade.
+
+```{r func-fevd-sinais}
 # FEVD do choque 1 como array [variável, horizonte, draw], em %
 fevd_sinais <- function(post, horizonte = params$passos) {
   fv <- compute_variance_decompositions(post, horizon = horizonte)
@@ -101,7 +110,11 @@ fevd_sinais <- function(post, horizonte = params$passos) {
   if (max(out, na.rm = TRUE) <= 1) out <- 100 * out
   out
 }
+```
 
+`irf_cholesky`: Calcula o benchmark recursivo a partir dos mesmos sorteios da forma reduzida usados na identificação por sinais. Para cada sorteio, recupera a matriz de covariância a partir da matriz estrutural, aplica a decomposição de Cholesky na ordem escolhida e propaga o impacto pela matriz companheira. Como as duas identificações compartilham a posterior, qualquer diferença entre as curvas vem da identificação, e não da estimação.
+
+```{r func-irf-cholesky}
 # Cholesky calculado a partir dos MESMOS draws da forma reduzida.
 # Em bsvars: y_t = A x_t + e_t, B e_t = u_t, u_t ~ N(0, I), logo Sigma = B^-1 B^-1'.
 # `ordem` define a ordenação recursiva; `choque` é a posição do juro nessa ordem.
@@ -134,7 +147,11 @@ irf_cholesky <- function(post, p, ordem, choque, horizonte = params$passos) {
   }
   out
 }
+```
 
+`quantis_irf`: Resume os sorteios em três linhas por horizonte: os quantis de 16%, 50% e 84%. É a convenção de Uhlig, equivalente a uma banda de um desvio-padrão se a distribuição fosse normal. A saída é um data frame longo, que empilha modelos diferentes para comparação no mesmo gráfico.
+
+```{r func-quantis-irf}
 # Quantis (16%, 50%, 84%) a partir de um array [variável, horizonte, draw]
 quantis_irf <- function(arr, rotulos, modelo = "", probs = c(0.16, 0.5, 0.84)) {
   out <- lapply(seq_along(rotulos), function(j) {
@@ -146,7 +163,11 @@ quantis_irf <- function(arr, rotulos, modelo = "", probs = c(0.16, 0.5, 0.84)) {
   df$variavel <- factor(df$variavel, levels = rotulos)
   df
 }
+```
 
+`plot_irf`: Desenha as respostas com mediana e banda, uma faceta por variável e uma cor por modelo. O eixo horizontal está em anos, embora os dados sejam mensais, para facilitar a leitura de horizontes longos.
+
+```{r func-plot-irf}
 plot_irf <- function(df, titulo = NULL, ncol = 2) {
   ggplot(df, aes(x = h / 12)) +
     geom_hline(yintercept = 0, linewidth = 0.3) +
@@ -159,7 +180,11 @@ plot_irf <- function(df, titulo = NULL, ncol = 2) {
     theme_minimal() +
     theme(legend.position = "bottom")
 }
+```
 
+`tabela_fevd`: Formata a decomposição da variância em horizontes selecionados, reportando mediana e banda de 68% numa única célula. Serve para o texto do relatório, em que a tabela substitui a figura.
+
+```{r func-tabela-fevd}
 # FEVD: mediana [16%; 84%] em horizontes selecionados (meses)
 tabela_fevd <- function(arr, rotulos, meses = c(0, 12, 24, 48)) {
   meses <- meses[meses + 1 <= dim(arr)[2]]
@@ -172,12 +197,20 @@ tabela_fevd <- function(arr, rotulos, meses = c(0, 12, 24, 48)) {
   tab <- matrix(tab, nrow = length(meses), dimnames = list(paste0("h = ", meses, " m"), rotulos))
   as.data.frame(tab)
 }
+```
 
+`prob_negativa`: Calcula a fração de sorteios em que a resposta da variável é negativa em cada horizonte. É a medida mais direta da pergunta do trabalho: valores próximos de 0,5 indicam resposta ambígua; próximos de 1, contração clara. Ao contrário da banda, essa medida não depende de escolher um nível de credibilidade.
+
+```{r func-prob-negativa}
 # P(resposta da variável j < 0) em cada horizonte
 prob_negativa <- function(arr, j = 1, meses = c(0, 6, 12, 24, 36)) {
   sapply(meses, function(h) mean(arr[j, h + 1, ] < 0, na.rm = TRUE))
 }
+```
 
+`como_matriz`: Converte o data frame de dados numa matriz com nomes de coluna, formato exigido pelo `bsvarSIGNs`, preservando a ordem das variáveis que define a posição de cada restrição.
+
+```{r func-como-matriz}
 como_matriz <- function(df, colunas) {
   m <- as.matrix(df[, colunas])
   colnames(m) <- colunas
@@ -187,7 +220,7 @@ como_matriz <- function(df, colunas) {
 
 # Parte A — Replicação de Uhlig (2005)
 
-A base `monetary` do bsvarSIGNs traz as seis variáveis de Uhlig, em log (fed funds em decimal), e é a usada no exemplo do pacote. A ordem é PIB, deflator, commodities, reservas totais, reservas não emprestadas e fed funds. Cortamos em dezembro de 2003 para ficar na amostra do paper.
+A base `monetary` do bsvarSIGNs traz as seis variáveis de Uhlig, em log (fed funds em decimal). A ordem é PIB, deflator, commodities, reservas totais, reservas não emprestadas e fed funds. Cortamos em dezembro de 2003 para ficar na amostra do paper.
 
 ```{r uhlig-dados}
 data(monetary)
@@ -297,7 +330,9 @@ cat(sprintf("lag.max = %d | AIC: p = %d | HQ: p = %d | BIC: p = %d | FPE: p = %d
 kable(round(t(ic$criteria), 3), caption = "Critérios de informação por defasagem")
 ```
 
-```{r diagnostico-funcoes}
+`teste_es`: Aplica o teste de Edgerton-Shukur para ausência de autocorrelação nos resíduos, varrendo defasagens de `p+1` a `p+12`. Preferimos essa versão ao Portmanteau porque ela continua válida com variáveis I(1) no sistema, que é o nosso caso.
+
+```{r func-teste-es}
 # Teste de Edgerton-Shukur (Breusch-Godfrey corrigido para amostras pequenas;
 # continua válido com variáveis I(1) no sistema, ao contrário do Portmanteau)
 teste_es <- function(fit, p_sel, ate = 12) {
@@ -307,7 +342,11 @@ teste_es <- function(fit, p_sel, ate = 12) {
                p_valor = unname(tt$serial$p.value))
   }))
 }
+```
 
+`outliers_residuos`: Roda o procedimento de Chen e Liu sobre os resíduos de cada equação, modelados como ARIMA(0,0,0) sem média, já que resíduos de VAR deveriam ser ruído branco em torno de zero. Devolve tipo, data e estatística t de cada ponto atípico com `|t| > 4`.
+
+```{r func-outliers-residuos}
 # tso() (Chen e Liu) sobre os resíduos de cada equação: ARIMA(0,0,0) sem média,
 # porque resíduos de VAR devem ser ruído branco em torno de zero
 outliers_residuos <- function(fit, datas, corte = 4) {
@@ -323,7 +362,11 @@ outliers_residuos <- function(fit, datas, corte = 4) {
                data = datas_res[o$outliers$ind], tstat = round(o$outliers$tstat, 2))
   }))
 }
+```
 
+`cria_dummies`: Converte os outliers detectados em variáveis binárias: impulso para observações aberrantes e mudanças transitórias, degrau para mudanças de nível. As dummies entram como exógenas na reseleção de defasagens e na estimação alternativa.
+
+```{r func-cria-dummies}
 # Dummies a partir dos outliers detectados: impulso para AO e TC, degrau para LS
 cria_dummies <- function(tab_out, datas) {
   if (is.null(tab_out) || nrow(tab_out) == 0) return(NULL)
@@ -527,7 +570,9 @@ write_csv(q_rob, "output/irf_robustez_pib.csv")
 
 # Extensão possível: restrição narrativa
 
-O bsvarSIGNs também aceita restrições narrativas (Antolín-Díaz e Rubio-Ramírez, 2018): por exemplo, exigir que o choque seja positivo num mês em que se sabe que houve aperto surpresa. Para o Canadá, os meses podem vir dos choques narrativos de Champagne e Sekkel (2018). A sintaxe está em `?specify_narrative`.
+O bsvarSIGNs aceita, além dos sinais, restrições narrativas (Antolín-Díaz e Rubio-Ramírez, 2018): exigir que o choque tenha determinado sinal, ou que explique a maior parte do movimento de uma variável, em datas específicas.
+
+No caso canadense, um candidato natural é setembro de 1998, quando o Banco do Canadá subiu a taxa em 100 p.b. de forma não programada durante a crise russa — data que o diagnóstico de outliers acima identifica na equação da overnight. Impor que o choque monetário seja positivo nesse mês reduziria bastante o conjunto identificado. A sintaxe está na função `?specify_narrative` do `bsvarSIGNs`.
 
 # Sessão
 
