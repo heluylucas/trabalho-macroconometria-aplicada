@@ -1,0 +1,536 @@
+---
+title: "01 — Efeitos da política monetária sobre o produto no Canadá: identificação agnóstica à la Uhlig (2005)"
+subtitle: "Trabalho final de Macroeconometria Aplicada (EESP/FGV) — versão com bsvarSIGNs"
+author: "Lucas Heluy, Mateus Belline, Theodoro Mota"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+params:
+  inicio: "1997-01-01"     # início da amostra canadense (PIB mensal começa em 1997)
+  fim: "2019-12-01"        # fim antes da pandemia e do limite inferior de 2020-22
+  p: 12                    # lags do VAR (Uhlig usa 12)
+  K: 5                     # restrições valem em k = 0, ..., K meses após o choque
+  passos: 60               # horizonte das IRFs (meses)
+  S: 1000                  # draws da posterior que satisfazem as restrições
+  S_robustez: 500          # draws por especificação na robustez
+  dummies: false           # observações dummy do prior (false = mais próximo de Uhlig)
+  robustez: true           # rodar a seção de robustez (mais demorada)
+  semente: 12345
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE,
+                      fig.width = 9, fig.height = 7)
+```
+
+# Estrutura do script
+
+1.  **Replicação de Uhlig (2005)** com a base `monetary` do bsvarSIGNs (as variáveis de Uhlig): restrições de sinal (Fig. 6) e Cholesky (Fig. 5).
+2.  **Aplicação ao Canadá**: baseline, variante com câmbio restrito e Cholesky.
+3.  **FEVD** e probabilidade posterior de o PIB cair.
+4.  **Robustez**: horizonte K, lags, amostra pré-limite inferior, fed funds e prior.
+
+Este script **não baixa dados**: ele lê `dados/dados_canada.csv`, gerado por `00_download_dados.Rmd`. Figuras e tabelas vão para `output/`.
+
+## O que muda em relação ao VARsignR e ao paper
+
+O bsvarSIGNs implementa o algoritmo de Arias, Rubio-Ramírez e Waggoner (2018). Em vez de sortear um único vetor α na esfera, ele sorteia uma matriz de rotação Q uniforme e guarda o sorteio se a coluna do choque satisfizer os sinais. A primeira coluna de uma Q uniforme é um α uniforme na esfera, então **com restrições só de sinal o procedimento equivale ao de Uhlig**. Três diferenças precisam ser registradas no texto:
+
+-   **Prior:** o pacote usa um prior Minnesota com encolhimento hierárquico, não o Normal-Wishart difuso de Uhlig. Com amostra curta e 12 lags isso ajuda, mas os números da replicação não serão idênticos aos do paper.
+-   **Constante:** o modelo sempre inclui intercepto. Uhlig não inclui.
+-   **Draws:** `S` é o número de sorteios **aceitos**. O pacote continua sorteando até obtê-los, então não há contagem de rejeições como no VARsignR.
+
+**Como as restrições são escritas.** `sign_irf` é um array N × N × (K + 1): linha = variável, coluna = choque, fatia h = horizonte h − 1. Os valores são `1` (≥ 0), `-1` (≤ 0), `0` (zero) ou `NA` (livre). Restringimos só a coluna 1, que passa a ser o choque monetário; as demais colunas ficam sem interpretação.
+
+# Pacotes e funções auxiliares
+
+```{r pacotes}
+pacotes <- c("bsvarSIGNs", "vars", "tsoutliers", "forecast",
+             "dplyr", "tidyr", "readr", "ggplot2", "knitr")
+faltando <- pacotes[!pacotes %in% rownames(installed.packages())]
+if (length(faltando) > 0) install.packages(faltando)
+invisible(lapply(pacotes, library, character.only = TRUE))
+
+dir.create("output", showWarnings = FALSE)
+```
+
+```{r funcoes}
+# Array de restrições para o choque na coluna 1, nos horizontes 0..K
+cria_sign_irf <- function(restricoes, K = params$K) {
+  N <- length(restricoes)
+  m <- matrix(NA_real_, N, N)
+  m[, 1] <- restricoes
+  array(m, dim = c(N, N, K + 1))
+}
+
+# Especifica e estima o modelo com restrições de sinal
+estima_sinais <- function(Y, restricoes, p = params$p, K = params$K, S = params$S,
+                          dummies = params$dummies, exogenas = NULL) {
+  set.seed(params$semente)
+  spec <- if (is.null(exogenas)) {
+    specify_bsvarSIGN$new(as.matrix(Y), p = p,
+                          sign_irf = cria_sign_irf(restricoes, K))
+  } else {
+    specify_bsvarSIGN$new(as.matrix(Y), p = p,
+                          sign_irf = cria_sign_irf(restricoes, K),
+                          exogenous = as.matrix(exogenas))
+  }
+  # bsvarSIGNs 2.0 não tem no_dummy_observations(): zerar as observações dummy
+  # (soma dos coeficientes e raiz unitária única) do prior equivale a removê-las
+  if (!dummies) {
+    spec$prior$Ysoc[] <- 0; spec$prior$Xsoc[] <- 0
+    spec$prior$Ysur[] <- 0; spec$prior$Xsur[] <- 0
+  }
+  estimate(spec, S = S, show_progress = FALSE)
+}
+
+# IRFs do choque 1 como array [variável, horizonte, draw]
+irf_sinais <- function(post, horizonte = params$passos) {
+  irf <- compute_impulse_responses(post, horizon = horizonte)
+  stopifnot(length(dim(irf)) == 4)          # [variável, choque, horizonte, draw]
+  irf[, 1, , , drop = TRUE]
+}
+
+# FEVD do choque 1 como array [variável, horizonte, draw], em %
+fevd_sinais <- function(post, horizonte = params$passos) {
+  fv <- compute_variance_decompositions(post, horizon = horizonte)
+  out <- fv[, 1, , , drop = TRUE]
+  if (max(out, na.rm = TRUE) <= 1) out <- 100 * out
+  out
+}
+
+# Cholesky calculado a partir dos MESMOS draws da forma reduzida.
+# Em bsvars: y_t = A x_t + e_t, B e_t = u_t, u_t ~ N(0, I), logo Sigma = B^-1 B^-1'.
+# `ordem` define a ordenação recursiva; `choque` é a posição do juro nessa ordem.
+irf_cholesky <- function(post, p, ordem, choque, horizonte = params$passos) {
+  A <- post$posterior$A
+  B <- post$posterior$B
+  N <- dim(B)[1]
+  S <- dim(B)[3]
+  if (is.null(A) || is.null(B) || dim(A)[2] < N * p)
+    stop("Estrutura inesperada em post$posterior. Rode str(post$posterior).")
+
+  J <- cbind(diag(N), matrix(0, N, N * (p - 1)))
+  out <- array(NA_real_, c(N, horizonte + 1, S))
+  for (s in seq_len(S)) {
+    Binv  <- solve(B[, , s])
+    Sigma <- Binv %*% t(Binv)
+    P_o   <- t(chol(Sigma[ordem, ordem]))
+    P     <- matrix(0, N, N)
+    P[ordem, ] <- P_o                          # volta à ordem original das variáveis
+
+    comp <- matrix(0, N * p, N * p)            # matriz companheira
+    comp[1:N, ] <- A[, 1:(N * p), s]
+    if (p > 1) comp[(N + 1):(N * p), 1:(N * (p - 1))] <- diag(N * (p - 1))
+
+    Ck <- diag(N * p)
+    for (h in 0:horizonte) {
+      out[, h + 1, s] <- (J %*% Ck %*% t(J) %*% P)[, choque]
+      Ck <- Ck %*% comp
+    }
+  }
+  out
+}
+
+# Quantis (16%, 50%, 84%) a partir de um array [variável, horizonte, draw]
+quantis_irf <- function(arr, rotulos, modelo = "", probs = c(0.16, 0.5, 0.84)) {
+  out <- lapply(seq_along(rotulos), function(j) {
+    q <- apply(arr[j, , , drop = FALSE][1, , ], 1, quantile, probs = probs, na.rm = TRUE)
+    data.frame(modelo = modelo, variavel = rotulos[j], h = seq_len(ncol(q)) - 1,
+               q16 = q[1, ], q50 = q[2, ], q84 = q[3, ])
+  })
+  df <- do.call(rbind, out)
+  df$variavel <- factor(df$variavel, levels = rotulos)
+  df
+}
+
+plot_irf <- function(df, titulo = NULL, ncol = 2) {
+  ggplot(df, aes(x = h / 12)) +
+    geom_hline(yintercept = 0, linewidth = 0.3) +
+    geom_ribbon(aes(ymin = q16, ymax = q84, fill = modelo), alpha = 0.25) +
+    geom_line(aes(y = q50, colour = modelo), linewidth = 0.7) +
+    facet_wrap(~ variavel, scales = "free_y", ncol = ncol) +
+    labs(x = "anos após o choque", y = "% (juros: p.p.)", title = titulo,
+         colour = NULL, fill = NULL,
+         caption = "Linha: mediana; banda: quantis de 16% e 84% da posterior.") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+# FEVD: mediana [16%; 84%] em horizontes selecionados (meses)
+tabela_fevd <- function(arr, rotulos, meses = c(0, 12, 24, 48)) {
+  meses <- meses[meses + 1 <= dim(arr)[2]]
+  tab <- sapply(seq_along(rotulos), function(j) {
+    sapply(meses, function(h) {
+      q <- quantile(arr[j, h + 1, ], c(0.16, 0.5, 0.84), na.rm = TRUE)
+      sprintf("%.1f [%.1f; %.1f]", q[2], q[1], q[3])
+    })
+  })
+  tab <- matrix(tab, nrow = length(meses), dimnames = list(paste0("h = ", meses, " m"), rotulos))
+  as.data.frame(tab)
+}
+
+# P(resposta da variável j < 0) em cada horizonte
+prob_negativa <- function(arr, j = 1, meses = c(0, 6, 12, 24, 36)) {
+  sapply(meses, function(h) mean(arr[j, h + 1, ] < 0, na.rm = TRUE))
+}
+
+como_matriz <- function(df, colunas) {
+  m <- as.matrix(df[, colunas])
+  colnames(m) <- colunas
+  m
+}
+```
+
+# Parte A — Replicação de Uhlig (2005)
+
+A base `monetary` do bsvarSIGNs traz as seis variáveis de Uhlig, em log (fed funds em decimal), e é a usada no exemplo do pacote. A ordem é PIB, deflator, commodities, reservas totais, reservas não emprestadas e fed funds. Cortamos em dezembro de 2003 para ficar na amostra do paper.
+
+```{r uhlig-dados}
+data(monetary)
+mon <- monetary * 100
+if (is.ts(mon)) {
+  mon <- window(mon, end = c(2003, 12))
+  print(c(inicio = paste(start(mon), collapse = "-"), fim = paste(end(mon), collapse = "-")))
+}
+rot_us <- c("PIB real", "Deflator do PIB", "Commodities", "Reservas totais",
+            "Reservas não emprestadas", "Fed funds")
+```
+
+Restrições da Fig. 6: fed funds ≥ 0; deflator, commodities e reservas não emprestadas ≤ 0, para k = 0, ..., 5. PIB e reservas totais livres.
+
+```{r uhlig-estimacao, results="hide"}
+restr_us <- c(NA, -1, -1, NA, -1, 1)
+post_us  <- estima_sinais(mon, restr_us, p = 12, K = 5)
+irf_us   <- irf_sinais(post_us)
+
+# Fig. 5: fed funds em 4º, antes de reservas não emprestadas e totais
+ordem_us <- c(1, 2, 3, 6, 5, 4)
+irf_us_chol <- irf_cholesky(post_us, p = 12, ordem = ordem_us, choque = 4)
+```
+
+```{r uhlig-figuras, fig.height=8}
+q_us <- rbind(quantis_irf(irf_us,      rot_us, "Restrições de sinal (Fig. 6)"),
+              quantis_irf(irf_us_chol, rot_us, "Cholesky (Fig. 5)"))
+g_us <- plot_irf(q_us, "Replicação de Uhlig (2005): choque contracionista de 1 d.p., EUA")
+g_us
+ggsave("output/fig_replicacao_uhlig.png", g_us, width = 9, height = 8, dpi = 300)
+write_csv(q_us, "output/irf_replicacao_uhlig.csv")
+```
+
+**O que conferir.** Com sinais, a banda do PIB deve ficar em torno de zero (no paper, ±0,2%); a fed funds sobe cerca de 20 p.b. e reverte em menos de um ano; o deflator cai devagar. No Cholesky, o PIB cai com clareza e o deflator sobe antes de cair (*price puzzle*). Diferenças de magnitude são esperadas pelo prior e pela constante.
+
+```{r uhlig-fevd}
+kable(tabela_fevd(fevd_sinais(post_us), rot_us),
+      caption = "EUA, sinais: % da variância explicada pelo choque monetário (mediana [16%; 84%])")
+```
+
+# Parte B — Canadá
+
+## Dados e transformações
+
+Logs multiplicados por 100 (IRFs em %) e juros em % a.a. (IRFs em p.p.).
+
+```{r dados-canada}
+dados <- read_csv("dados/dados_canada.csv", show_col_types = FALSE)
+
+base <- dados |>
+  transmute(date,
+            pib       = 100 * log(pib),
+            cpi       = 100 * log(cpi),
+            bcpi      = 100 * log(bcpi),
+            overnight = overnight,
+            m1        = 100 * log(m1),
+            cadusd    = 100 * log(cadusd),
+            fedfunds  = fedfunds)
+
+vars_ca <- c("pib", "cpi", "bcpi", "overnight", "m1", "cadusd")
+rot_ca  <- c("PIB real", "CPI", "BCPI (commodities)", "Taxa overnight", "M1+",
+             "CAD/USD (alta = depreciação)")
+
+amostra <- base |>
+  filter(date >= as.Date(params$inicio), date <= as.Date(params$fim))
+stopifnot(!any(is.na(as.matrix(amostra[, vars_ca]))))
+
+Y_ca <- como_matriz(amostra, vars_ca)
+c(inicio = format(min(amostra$date)), fim = format(max(amostra$date)), T = nrow(amostra))
+```
+
+```{r dados-grafico, fig.height=7}
+amostra |>
+  select(date, all_of(vars_ca)) |>
+  pivot_longer(-date) |>
+  mutate(name = factor(name, levels = vars_ca, labels = rot_ca)) |>
+  ggplot(aes(date, value)) +
+  geom_line() +
+  facet_wrap(~ name, scales = "free_y", ncol = 2) +
+  labs(x = NULL, y = NULL, title = "Variáveis do VAR (100 × log; juros em % a.a.)") +
+  theme_minimal()
+```
+
+## Seleção de defasagens e diagnóstico de resíduos
+
+Uhlig fixa 12 defasagens por convenção, seguindo a base de Bernanke e Mihov, sem critério de informação nem teste de especificação. Mantemos `p = 12` no baseline por comparabilidade, mas fazemos aqui o percurso padrão: critérios de informação, diagnóstico de resíduos, detecção de outliers, reseleção com dummies e reestimação. O resultado entra como robustez, não como baseline.
+
+```{r criterios-informacao}
+inicio_ts <- c(as.integer(format(min(amostra$date), "%Y")),
+               as.integer(format(min(amostra$date), "%m")))
+Y_ts <- ts(Y_ca, start = inicio_ts, frequency = 12)
+
+# lag.max começa em 12 (um ano de dinâmica em dados mensais) e sobe se algum
+# critério ficar preso no limite
+lag_max <- 12
+repeat {
+  ic <- VARselect(Y_ts, lag.max = lag_max, type = "const")
+  if (!any(ic$selection == lag_max) || lag_max >= 24) break
+  lag_max <- lag_max + 6
+}
+
+p_aic <- as.integer(ic$selection["AIC(n)"])
+p_bic <- as.integer(ic$selection["SC(n)"])
+cat(sprintf("lag.max = %d | AIC: p = %d | HQ: p = %d | BIC: p = %d | FPE: p = %d\n",
+            lag_max, p_aic, as.integer(ic$selection["HQ(n)"]), p_bic,
+            as.integer(ic$selection["FPE(n)"])))
+kable(round(t(ic$criteria), 3), caption = "Critérios de informação por defasagem")
+```
+
+```{r diagnostico-funcoes}
+# Teste de Edgerton-Shukur (Breusch-Godfrey corrigido para amostras pequenas;
+# continua válido com variáveis I(1) no sistema, ao contrário do Portmanteau)
+teste_es <- function(fit, p_sel, ate = 12) {
+  do.call(rbind, lapply(seq(p_sel + 1, p_sel + ate), function(j) {
+    tt <- serial.test(fit, lags.bg = j, type = "ES")
+    data.frame(lag = j, F_stat = unname(tt$serial$statistic),
+               p_valor = unname(tt$serial$p.value))
+  }))
+}
+
+# tso() (Chen e Liu) sobre os resíduos de cada equação: ARIMA(0,0,0) sem média,
+# porque resíduos de VAR devem ser ruído branco em torno de zero
+outliers_residuos <- function(fit, datas, corte = 4) {
+  res <- residuals(fit)
+  datas_res <- tail(datas, nrow(res))
+  d0 <- c(as.integer(format(datas_res[1], "%Y")), as.integer(format(datas_res[1], "%m")))
+  do.call(rbind, lapply(seq_len(ncol(res)), function(j) {
+    y <- ts(res[, j], start = d0, frequency = 12)
+    o <- tso(y, cval = corte, tsmethod = "arima",
+             args.tsmethod = list(order = c(0, 0, 0), include.mean = FALSE))
+    if (nrow(o$outliers) == 0) return(NULL)
+    data.frame(equacao = colnames(res)[j], tipo = o$outliers$type,
+               data = datas_res[o$outliers$ind], tstat = round(o$outliers$tstat, 2))
+  }))
+}
+
+# Dummies a partir dos outliers detectados: impulso para AO e TC, degrau para LS
+cria_dummies <- function(tab_out, datas) {
+  if (is.null(tab_out) || nrow(tab_out) == 0) return(NULL)
+  tab <- tab_out[!duplicated(paste(tab_out$tipo, tab_out$data)), ]
+  M <- sapply(seq_len(nrow(tab)), function(i) {
+    if (tab$tipo[i] == "LS") as.numeric(datas >= tab$data[i])
+    else as.numeric(datas == tab$data[i])
+  })
+  M <- matrix(M, nrow = length(datas))
+  colnames(M) <- paste0(tab$tipo, "_", format(tab$data, "%Y%m"))
+  M
+}
+```
+
+```{r diagnostico-candidatos, fig.height=6}
+var_aic <- VAR(Y_ts, p = p_aic, type = "const")
+var_bic <- VAR(Y_ts, p = p_bic, type = "const")
+var_u   <- VAR(Y_ts, p = params$p, type = "const")   # o VAR(12) de Uhlig
+
+Acf(residuals(var_u), main = "")
+
+diag_es <- rbind(
+  transform(teste_es(var_bic, p_bic),      modelo = paste0("BIC: VAR(", p_bic, ")")),
+  transform(teste_es(var_aic, p_aic),      modelo = paste0("AIC: VAR(", p_aic, ")")),
+  transform(teste_es(var_u,   params$p),   modelo = paste0("Uhlig: VAR(", params$p, ")"))
+)
+kable(diag_es, digits = 3, row.names = FALSE,
+      caption = "Edgerton-Shukur: H0 = ausência de autocorrelação nos resíduos")
+```
+
+```{r outliers}
+tab_out <- outliers_residuos(var_u, amostra$date)
+if (is.null(tab_out)) {
+  cat("Nenhum outlier detectado com |t| > 4.\n")
+} else {
+  kable(tab_out, row.names = FALSE,
+        caption = "Outliers nos resíduos do VAR(12) (tso, Chen e Liu)")
+}
+exo <- cria_dummies(tab_out, amostra$date)
+```
+
+```{r reselecao}
+if (!is.null(exo)) {
+  ic_d <- VARselect(Y_ts, lag.max = lag_max, type = "const", exogen = exo)
+  cat(sprintf("Com dummies — AIC: p = %d | HQ: p = %d | BIC: p = %d | FPE: p = %d\n",
+              ic_d$selection["AIC(n)"], ic_d$selection["HQ(n)"],
+              ic_d$selection["SC(n)"], ic_d$selection["FPE(n)"]))
+
+  # Comparação dos critérios na mesma ordem, com e sem dummies (mesma amostra efetiva)
+  p_cmp <- as.integer(ic_d$selection["AIC(n)"])
+  kable(round(rbind(`sem dummies` = ic$criteria[, p_cmp],
+                    `com dummies` = ic_d$criteria[, p_cmp]), 3),
+        caption = paste0("Critérios em p = ", p_cmp, ", com e sem as dummies"))
+
+  p_curso <- p_cmp
+} else {
+  p_curso <- p_aic
+}
+cat("Defasagem escolhida pelo procedimento do curso: p =", p_curso, "\n")
+```
+
+O modelo alternativo entra na robustez com essa defasagem e com as dummies no `exogenous`. Se os critérios apontarem `p` pequeno mas o Edgerton-Shukur rejeitar nesse `p`, o diagnóstico manda: fica-se com a ordem maior, que é o argumento para manter o `p = 12` de Uhlig.
+
+A comparação com o baseline está na seção seguinte, depois da estimação.
+
+## Identificação
+
+|                     | PIB | CPI | BCPI | Overnight | M1+ | CAD/USD |
+|---------------------|-----|-----|------|-----------|-----|---------|
+| **Baseline**        | NA  | −1  | NA   | 1         | −1  | NA      |
+| **Câmbio restrito** | NA  | −1  | NA   | 1         | −1  | −1      |
+
+Restrições nos horizontes k = 0, ..., `r params$K`.
+
+```{r canada-estimacao, results="hide"}
+restr_base   <- c(NA, -1, NA, 1, -1, NA)   # overnight >= 0; CPI <= 0; M1+ <= 0
+restr_cambio <- c(NA, -1, NA, 1, -1, -1)   # + CAD/USD <= 0 (apreciação do CAD)
+
+post_ca        <- estima_sinais(Y_ca, restr_base)
+post_ca_cambio <- estima_sinais(Y_ca, restr_cambio)
+
+irf_ca        <- irf_sinais(post_ca)
+irf_ca_cambio <- irf_sinais(post_ca_cambio)
+
+# Cholesky com a overnight em 4º (PIB, CPI e BCPI não reagem no impacto)
+irf_ca_chol <- irf_cholesky(post_ca, p = params$p, ordem = 1:6, choque = 4)
+```
+
+## Resultados: baseline contra Cholesky
+
+```{r canada-irf-base, fig.height=8}
+q_ca <- rbind(quantis_irf(irf_ca,      rot_ca, "Restrições de sinal (baseline)"),
+              quantis_irf(irf_ca_chol, rot_ca, "Cholesky"))
+g_ca <- plot_irf(q_ca, "Canadá: choque monetário contracionista de 1 d.p.")
+g_ca
+ggsave("output/fig_canada_baseline_vs_cholesky.png", g_ca, width = 9, height = 8, dpi = 300)
+write_csv(q_ca, "output/irf_canada_baseline_cholesky.csv")
+```
+
+## Resultados: câmbio livre contra câmbio restrito
+
+```{r canada-irf-cambio, fig.height=8}
+q_cambio <- rbind(quantis_irf(irf_ca,        rot_ca, "Câmbio livre"),
+                  quantis_irf(irf_ca_cambio, rot_ca, "Câmbio restrito"))
+g_cambio <- plot_irf(q_cambio, "Canadá: efeito de restringir a resposta do câmbio")
+g_cambio
+
+ggsave("output/fig_canada_cambio.png", g_cambio, width = 9, height = 8, dpi = 300)
+```
+
+## Resultados: defasagem de Uhlig contra a do procedimento do curso
+
+```{r canada-lags, results="hide"}
+post_curso <- estima_sinais(Y_ca, restr_base, p = p_curso, exogenas = exo)
+irf_curso  <- irf_sinais(post_curso)
+```
+
+```{r canada-lags-figura, fig.height=4}
+rot_pib <- "PIB real"
+q_lags <- rbind(
+  quantis_irf(irf_ca[1, , , drop = FALSE],    rot_pib, paste0("p = ", params$p, " (Uhlig)")),
+  quantis_irf(irf_curso[1, , , drop = FALSE], rot_pib,
+              paste0("p = ", p_curso, " (critérios + dummies)"))
+)
+g_lags <- plot_irf(q_lags, "Canadá: resposta do PIB sob as duas escolhas de defasagem", ncol = 1)
+g_lags
+ggsave("output/fig_canada_lags.png", g_lags, width = 8, height = 4.5, dpi = 300)
+```
+
+## Quanto o choque explica? (FEVD)
+
+```{r canada-fevd}
+fevd_ca <- tabela_fevd(fevd_sinais(post_ca), rot_ca)
+kable(fevd_ca, caption = "Canadá, baseline: % da variância explicada pelo choque monetário (mediana [16%; 84%])")
+write_csv(cbind(horizonte = rownames(fevd_ca), fevd_ca), "output/fevd_canada_baseline.csv")
+```
+
+## A resposta do PIB é negativa?
+
+Perto de 0,5 = resposta ambígua, como em Uhlig; perto de 1 = contração clara.
+
+```{r canada-prob}
+meses <- c(0, 6, 12, 24, 36)
+prob_pib <- data.frame(
+  meses          = meses,
+  sinal_baseline = prob_negativa(irf_ca,        meses = meses),
+  sinal_cambio   = prob_negativa(irf_ca_cambio, meses = meses),
+  cholesky       = prob_negativa(irf_ca_chol,   meses = meses),
+  uhlig_eua      = prob_negativa(irf_us,        meses = meses)
+)
+kable(prob_pib, digits = 2, caption = "P(resposta do PIB < 0)")
+write_csv(prob_pib, "output/prob_pib_negativo.csv")
+```
+
+# Parte C — Robustez
+
+Resposta do PIB sob especificações alternativas, mudando uma coisa por vez. A amostra 1997–2008 tem 144 observações e por isso usa 6 lags.
+
+```{r robustez, eval=params$robustez, results="hide"}
+amostra_pre <- base |> filter(date >= as.Date(params$inicio), date <= as.Date("2008-12-01"))
+Y_pre <- como_matriz(amostra_pre, vars_ca)
+Y_ff  <- como_matriz(amostra, c(vars_ca, "fedfunds"))   # fed funds livre, em 7º
+
+especificacoes <- list(
+  "Baseline (K = 5)"       = list(Y = Y_ca,  r = restr_base),
+  "K = 2"                  = list(Y = Y_ca,  r = restr_base, K = 2),
+  "K = 11"                 = list(Y = Y_ca,  r = restr_base, K = 11),
+  "K = 23"                 = list(Y = Y_ca,  r = restr_base, K = 23),
+  "6 lags"                 = list(Y = Y_ca,  r = restr_base, p = 6),
+  "Amostra 1997-2008"      = list(Y = Y_pre, r = restr_base, p = 6),
+  "Com fed funds (7 var.)" = list(Y = Y_ff,  r = c(restr_base, NA)),
+  "Com dummies no prior"   = list(Y = Y_ca,  r = restr_base, dummies = TRUE)
+)
+
+q_rob <- do.call(rbind, lapply(names(especificacoes), function(nome) {
+  e <- especificacoes[[nome]]
+  post <- estima_sinais(e$Y, e$r,
+                        p       = if (is.null(e$p))       params$p       else e$p,
+                        K       = if (is.null(e$K))       params$K       else e$K,
+                        dummies = if (is.null(e$dummies)) params$dummies else e$dummies,
+                        S       = params$S_robustez)
+  quantis_irf(irf_sinais(post)[1, , , drop = FALSE], "PIB real", nome)
+}))
+q_rob$modelo <- factor(q_rob$modelo, levels = names(especificacoes))
+```
+
+```{r robustez-figura, eval=params$robustez, fig.height=9}
+g_rob <- ggplot(q_rob, aes(x = h / 12)) +
+  geom_hline(yintercept = 0, linewidth = 0.3) +
+  geom_ribbon(aes(ymin = q16, ymax = q84), alpha = 0.25, fill = "steelblue") +
+  geom_line(aes(y = q50), colour = "steelblue4", linewidth = 0.7) +
+  facet_wrap(~ modelo, ncol = 2) +
+  labs(x = "anos após o choque", y = "%",
+       title = "Canadá: resposta do PIB real sob especificações alternativas",
+       caption = "Linha: mediana; banda: quantis de 16% e 84% da posterior.") +
+  theme_minimal()
+g_rob
+ggsave("output/fig_robustez_pib.png", g_rob, width = 9, height = 9, dpi = 300)
+write_csv(q_rob, "output/irf_robustez_pib.csv")
+```
+
+# Extensão possível: restrição narrativa
+
+O bsvarSIGNs também aceita restrições narrativas (Antolín-Díaz e Rubio-Ramírez, 2018): por exemplo, exigir que o choque seja positivo num mês em que se sabe que houve aperto surpresa. Para o Canadá, os meses podem vir dos choques narrativos de Champagne e Sekkel (2018). A sintaxe está em `?specify_narrative`.
+
+# Sessão
+
+```{r sessao}
+sessionInfo()
+```

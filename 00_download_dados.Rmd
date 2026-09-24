@@ -1,0 +1,254 @@
+---
+title: "00 — Download e montagem da base de dados (Canadá)"
+subtitle: "Trabalho final de Macroeconometria Aplicada (EESP/FGV)"
+author: "Lucas Heluy, Mateus Belline, Theodoro Mota"
+date: "`r format(Sys.Date(), '%d/%m/%Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Objetivo
+
+Este script baixa todas as séries usadas no trabalho diretamente das fontes oficiais e salva a base em `dados/dados_canada.csv`. **Ele só precisa ser rodado uma vez.** O script principal (`01_analise_principal.Rmd`) lê apenas o `.csv` salvo, de modo que eventuais mudanças nas APIs não impedem a reprodução dos resultados.
+
+As séries são salvas **em nível e sem transformação**. Logaritmos, recorte da amostra e demais transformações são feitos no script principal, para que fiquem documentados junto com a estimação.
+
+| Variável | Descrição | Fonte | Código |
+|------------------|------------------|------------------|------------------|
+| `pib` | PIB real a preços básicos, todas as indústrias, dessaz., encadeado (2017) | Statistics Canada, tabela 36-10-0434-01 | vetor `v65201210` |
+| `cpi` | CPI all-items, dessazonalizado (2002 = 100) | Statistics Canada, tabela 18-10-0006-01 | vetor `v41690914` |
+| `overnight` | Taxa overnight, média mensal (% a.a.) | Banco do Canadá (Valet) | `V122514` |
+| `overnight_meta` | Meta da taxa overnight, fim do mês (% a.a.) | Banco do Canadá (Valet) | `STATIC_ATABLE_V39079` |
+| `bcpi` | Índice de preços de commodities do Banco do Canadá (BCPI), total | Banco do Canadá (Valet) | `M.BCPI` |
+| `m1` | M1+ (gross), dessazonalizado, fim do mês (milhões de CAD) | Banco do Canadá (Valet), grupo `e1_monthly` | identificado pelo rótulo |
+| `cadusd` | Taxa de câmbio, CAD por USD, média mensal | FRED (Federal Reserve Board) | `EXCAUS` |
+| `fedfunds` | Federal funds rate efetiva, média mensal (% a.a.) | FRED | `FEDFUNDS` |
+
+# Pacotes e pastas
+
+```{r pacotes}
+# Não usamos o pacote `cansim`: ele depende do `arrow`, cuja instalação costuma falhar.
+# Os dados do StatCan são baixados direto da API oficial (WDS) com o `jsonlite`.
+pacotes <- c("jsonlite", "dplyr", "tidyr", "readr", "ggplot2")
+faltando <- pacotes[!pacotes %in% rownames(installed.packages())]
+if (length(faltando) > 0) install.packages(faltando)
+invisible(lapply(pacotes, library, character.only = TRUE))
+
+dir.create("dados/brutos", recursive = TRUE, showWarnings = FALSE)
+
+# Baixamos com folga; o recorte da amostra é feito no script principal
+data_inicio <- "1990-01-01"
+```
+
+# Funções auxiliares
+
+```{r funcoes}
+# Converte "1997-01", "1997-01-01" ou Date para o primeiro dia do mês
+mes <- function(x) as.Date(paste0(substr(as.character(x), 1, 7), "-01"))
+
+# Statistics Canada — Web Data Service (WDS), método GET por vetor e período.
+# Retorna um data.frame com `date` (1º dia do mês) e `valor`.
+statcan <- function(vetor, inicio = data_inicio, fim = as.character(Sys.Date())) {
+  id  <- sub("^v", "", vetor, ignore.case = TRUE)
+  url <- paste0("https://www150.statcan.gc.ca/t1/wds/rest/",
+                "getDataFromVectorByReferencePeriodRange",
+                "?vectorIds=", id, "&startRefPeriod=", inicio,
+                "&endReferencePeriod=", fim)
+  js   <- jsonlite::fromJSON(url, simplifyVector = FALSE)
+  resp <- if (!is.null(js$status)) js else js[[1]]
+  if (!identical(resp$status, "SUCCESS"))
+    stop("O StatCan não retornou dados para o vetor ", vetor, " (status: ", resp$status, ").")
+  pts <- resp$object$vectorDataPoint
+  data.frame(
+    date  = mes(vapply(pts, function(p) p$refPer, character(1))),
+    valor = vapply(pts, function(p) if (is.null(p$value)) NA_real_ else as.numeric(p$value),
+                   numeric(1))
+  )
+}
+
+# Banco do Canadá — API Valet (pública, sem chave).
+# `caminho` pode ser uma lista de séries separadas por vírgula ("V122514,M.BCPI")
+# ou um grupo ("group/e1_monthly").
+valet <- function(caminho, inicio = data_inicio) {
+  url <- paste0("https://www.bankofcanada.ca/valet/observations/", caminho,
+                "/json?start_date=", inicio)
+  js  <- jsonlite::fromJSON(url, simplifyVector = FALSE)
+  obs <- js$observations
+  codigos <- names(js$seriesDetail)
+
+  df <- data.frame(date = mes(vapply(obs, function(o) o$d, character(1))))
+  for (cd in codigos) {
+    df[[cd]] <- vapply(obs, function(o) {
+      v <- o[[cd]]$v
+      if (is.null(v)) NA_real_ else suppressWarnings(as.numeric(v))
+    }, numeric(1))
+  }
+
+  pega <- function(s, campo) if (is.null(s[[campo]])) "" else as.character(s[[campo]])
+  series <- data.frame(
+    codigo    = codigos,
+    rotulo    = vapply(js$seriesDetail, pega, character(1), campo = "label"),
+    descricao = vapply(js$seriesDetail, pega, character(1), campo = "description"),
+    row.names = NULL
+  )
+  list(dados = df, series = series)
+}
+
+# FRED — download direto do CSV (não exige chave de API)
+fred <- function(id) {
+  x <- read.csv(paste0("https://fred.stlouisfed.org/graph/fredgraph.csv?id=", id),
+                stringsAsFactors = FALSE)
+  data.frame(date = mes(x[[1]]), valor = suppressWarnings(as.numeric(x[[2]])))
+}
+
+# Salva cada série bruta separadamente (rastreabilidade)
+salva_bruto <- function(df, nome) {
+  readr::write_csv(df, file.path("dados/brutos", paste0(nome, ".csv")))
+  invisible(df)
+}
+```
+
+# Download
+
+## PIB real mensal (Statistics Canada)
+
+```{r pib}
+pib <- statcan("v65201210") |>
+  rename(pib = valor) |>
+  arrange(date) |>
+  salva_bruto("pib")
+
+range(pib$date)
+```
+
+## CPI dessazonalizado (Statistics Canada)
+
+O vetor `v41690914` é o CPI all-items dessazonalizado para o Canadá (tabela 18-10-0006-01).
+
+```{r cpi}
+cpi <- statcan("v41690914") |>
+  rename(cpi = valor) |>
+  arrange(date) |>
+  salva_bruto("cpi")
+
+range(cpi$date)
+```
+
+## Taxa overnight (Banco do Canadá)
+
+`V122514` é a taxa overnight efetiva em média mensal (análoga à fed funds mensal usada por Uhlig). A meta de fim de mês é baixada para conferência. As duas séries mensais começam em janeiro de 1996.
+
+```{r overnight}
+on_raw <- valet("V122514,STATIC_ATABLE_V39079")
+on_raw$series
+
+overnight <- on_raw$dados |>
+  transmute(date, overnight = V122514, overnight_meta = STATIC_ATABLE_V39079) |>
+  salva_bruto("overnight")
+```
+
+## Preços de commodities — BCPI (Banco do Canadá)
+
+```{r bcpi}
+bcpi_raw <- valet("M.BCPI")
+bcpi_raw$series
+
+bcpi <- bcpi_raw$dados |>
+  transmute(date, bcpi = `M.BCPI`) |>
+  salva_bruto("bcpi")
+```
+
+## M1+ (Banco do Canadá)
+
+O M1+ dessazonalizado faz parte do grupo `e1_monthly` (antiga tabela E1). O código da série é identificado pelo rótulo. Se a busca falhar, a tabela de séries do grupo é impressa; basta copiar o código correto para `codigo_m1_manual`.
+
+```{r m1}
+codigo_m1_manual <- NA_character_   # preencha só se a busca automática falhar
+
+e1 <- valet("group/e1_monthly")
+texto <- paste(e1$series$rotulo, e1$series$descricao)
+
+cand <- e1$series[grepl("^M1\\+ \\(gross\\)", e1$series$rotulo) &
+                  grepl("seasonally adjusted", texto, ignore.case = TRUE) &
+                  !grepl("unadjusted", texto, ignore.case = TRUE), ]
+
+codigo_m1 <- if (!is.na(codigo_m1_manual)) codigo_m1_manual else {
+  if (nrow(cand) != 1) {
+    print(e1$series)
+    stop("Não foi possível identificar o M1+ dessazonalizado de forma única. ",
+         "Escolha o código na tabela acima e preencha `codigo_m1_manual`.")
+  }
+  cand$codigo
+}
+e1$series[e1$series$codigo == codigo_m1, ]
+
+m1 <- data.frame(date = e1$dados$date, m1 = e1$dados[[codigo_m1]]) |>
+  salva_bruto("m1")
+```
+
+## Câmbio e fed funds (FRED)
+
+`EXCAUS` está em CAD por USD: **alta = depreciação do dólar canadense**.
+
+```{r fred}
+cadusd   <- fred("EXCAUS")   |> rename(cadusd = valor)   |> salva_bruto("cadusd")
+fedfunds <- fred("FEDFUNDS") |> rename(fedfunds = valor) |> salva_bruto("fedfunds")
+```
+
+# Montagem e verificação da base
+
+```{r base}
+dados <- Reduce(function(a, b) full_join(a, b, by = "date"),
+                list(pib, cpi, overnight, bcpi, m1, cadusd, fedfunds)) |>
+  arrange(date) |>
+  filter(date >= as.Date(data_inicio))
+
+# Início e fim de cada série (a amostra comum começa com o PIB, em 1997)
+dados |>
+  pivot_longer(-date, names_to = "variavel", values_to = "valor") |>
+  filter(!is.na(valor)) |>
+  group_by(variavel) |>
+  summarise(inicio = min(date), fim = max(date), n = n(), .groups = "drop")
+```
+
+```{r grafico, fig.width=9, fig.height=8}
+dados |>
+  pivot_longer(-date, names_to = "variavel", values_to = "valor") |>
+  filter(!is.na(valor), variavel != "overnight_meta") |>
+  ggplot(aes(date, valor)) +
+  geom_line() +
+  facet_wrap(~ variavel, scales = "free_y", ncol = 2) +
+  labs(x = NULL, y = NULL, title = "Séries em nível, como baixadas") +
+  theme_minimal()
+```
+
+# Salvando
+
+```{r salvar}
+readr::write_csv(dados, "dados/dados_canada.csv")
+
+metadados <- data.frame(
+  variavel = c("pib", "cpi", "overnight", "overnight_meta", "bcpi", "m1", "cadusd", "fedfunds"),
+  fonte    = c("Statistics Canada", "Statistics Canada", "Banco do Canadá (Valet)",
+               "Banco do Canadá (Valet)", "Banco do Canadá (Valet)", "Banco do Canadá (Valet)",
+               "FRED", "FRED"),
+  codigo   = c("v65201210 (tab. 36-10-0434-01)", "v41690914 (tab. 18-10-0006-01)",
+               "V122514", "STATIC_ATABLE_V39079", "M.BCPI", codigo_m1, "EXCAUS", "FEDFUNDS"),
+  unidade  = c("milhões de CAD encadeados (2017), taxa anual", "índice 2002 = 100",
+               "% a.a.", "% a.a.", "índice", "milhões de CAD", "CAD por USD", "% a.a."),
+  data_download = as.character(Sys.Date())
+)
+readr::write_csv(metadados, "dados/metadados_series.csv")
+metadados
+```
+
+```{r sessao}
+sessionInfo()
+```
