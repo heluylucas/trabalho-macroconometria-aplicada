@@ -39,6 +39,7 @@ use `params$robustez = FALSE` e reduza `params$S`.
 | `00_download_dados.Rmd` | Baixa as séries do Statistics Canada, do Banco do Canadá e do FRED; salva `dados/dados_canada.csv`, as séries brutas em `dados/brutos/` e `dados/metadados_series.csv` |
 | `01_analise_principal.Rmd` | Replicação dos EUA, seleção de defasagens e diagnóstico, estimação do Canadá, FEVD e robustez |
 | `01_analise_principal.html` | Saída compilada do script acima, com todas as tabelas e figuras |
+| `02_figuras_slides.R` | Regera as figuras de IRF em formato de slide (largas, em PDF vetorial) a partir dos CSVs de `output/`; rode depois do script principal |
 | `dados/` | Base montada, séries brutas e metadados |
 | `output/` | Figuras (`.png`) e tabelas (`.csv`) geradas pelo script |
 | `Uso_IA.md` | Descrição do uso de ferramentas de IA |
