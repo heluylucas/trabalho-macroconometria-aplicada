@@ -43,6 +43,8 @@ use `params$robustez = FALSE` e reduza `params$S`.
 | `dados/` | Base montada, séries brutas e metadados |
 | `output/` | Figuras (`.png`) e tabelas (`.csv`) geradas pelo script |
 | `artigos/` | Os artigos em que o trabalho se baseia |
+| `trabalho_mapla_relatorio.pdf` | Relatório final (8 páginas): pergunta de pesquisa, literatura de base, modelo e dados, replicação de Uhlig (2005), resultados para o Canadá e discussão |
+| `trabalho_mapla_slides.pdf` | Slides da apresentação: mesma estrutura do relatório, com trechos do código na seção de metodologia |
 | `Uso_IA.md` | Descrição do uso de ferramentas de IA |
 
 ## Dados
