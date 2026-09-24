@@ -39,9 +39,6 @@ use `params$robustez = FALSE` e reduza `params$S`.
 | `00_download_dados.Rmd` | Baixa as séries do Statistics Canada, do Banco do Canadá e do FRED; salva `dados/dados_canada.csv`, as séries brutas em `dados/brutos/` e `dados/metadados_series.csv` |
 | `01_analise_principal.Rmd` | Replicação dos EUA, seleção de defasagens e diagnóstico, estimação do Canadá, FEVD e robustez |
 | `01_analise_principal.html` | Saída compilada do script acima, com todas as tabelas e figuras |
-| `relatorio.tex` / `relatorio.pdf` | Relatório final (máximo de 8 páginas) |
-| `apresentacao.tex` / `apresentacao.pdf` | Slides |
-| `artigos/` | Os artigos em que o trabalho se baseia |
 | `dados/` | Base montada, séries brutas e metadados |
 | `output/` | Figuras (`.png`) e tabelas (`.csv`) geradas pelo script |
 | `Uso_IA.md` | Descrição do uso de ferramentas de IA |
