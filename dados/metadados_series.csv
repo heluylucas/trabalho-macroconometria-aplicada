@@ -1,0 +1,9 @@
+variavel,fonte,codigo,unidade,data_download
+pib,Statistics Canada,v65201210 (tab. 36-10-0434-01),"milhões de CAD encadeados (2017), taxa anual",2026-09-23
+cpi,Statistics Canada,v41690914 (tab. 18-10-0006-01),índice 2002 = 100,2026-09-23
+overnight,Banco do Canadá (Valet),V122514,% a.a.,2026-09-23
+overnight_meta,Banco do Canadá (Valet),STATIC_ATABLE_V39079,% a.a.,2026-09-23
+bcpi,Banco do Canadá (Valet),M.BCPI,índice,2026-09-23
+m1,Banco do Canadá (Valet),V37151,milhões de CAD,2026-09-23
+cadusd,FRED,EXCAUS,CAD por USD,2026-09-23
+fedfunds,FRED,FEDFUNDS,% a.a.,2026-09-23
